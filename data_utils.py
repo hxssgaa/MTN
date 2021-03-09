@@ -31,7 +31,7 @@ class Batch:
         else:
             self.fts = None
             self.fts_mask = None 
-        self.query_mask = (query != pad).unsqueeze(-2)
+        self.query_mask = (query != pad)
         self.his_mask  = (his != pad).unsqueeze(-2)
         if cap is not None:
             self.cap = cap
@@ -41,9 +41,10 @@ class Batch:
             self.cap_mask = None
         if trg is not None:
             self.trg = trg
-            self.trg_y = trg_y
             self.trg_mask = self.make_std_mask(self.trg, pad)
-            self.ntokens = (self.trg_y != pad).data.sum()
+            if trg_y and trg_y[0]:
+                self.trg_y = trg_y
+                self.ntokens = (self.trg_y != pad).data.sum()
 
     @staticmethod
     def make_std_mask(tgt, pad):

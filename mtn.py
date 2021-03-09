@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.nn.utils.weight_norm import weight_norm
 import math, copy, time
 from torch.autograd import Variable
-from data_utils import * 
+from data_utils import *
 
 class EncoderDecoder(nn.Module):
     def __init__(self, query_encoder, his_encoder, cap_encoder, vid_encoder, decoder, query_embed, his_embed, cap_embed, tgt_embed, generator, diff_encoder=False, auto_encoder_embed=None, auto_encoder_ft=None, auto_encoder_generator=None):
@@ -328,6 +328,9 @@ class StPositionalEncoding(nn.Module):
         x = x + Variable(self.pe[:, x_st], requires_grad=False)
         x = x.squeeze(0)
         return self.dropout(x)
+
+def make_multi_enc_dec_model():
+    return
 
 def make_model(src_vocab, tgt_vocab, 
     N=6, d_model=512, d_ff=2048, h=8, dropout=0.1, 

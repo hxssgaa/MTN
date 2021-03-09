@@ -5,12 +5,12 @@
 stage=$1        # <=1: preparation <=2: training <=3: generating <=4: evaluating 
 fea_type=$2     # "vggish" OR "i3d_flow" OR "vggish i3d_flow"
 fea_names=$3    # vggish OR i3dflow OR vggish+i3dflow 
-num_epochs=$3   # e.g. 20 
+num_epochs=$4   # e.g. 20 
 warmup_steps=$5 # e.g. 9660
 dropout=$6      # e.g. 0.2
 
 # data setting 
-batch_size=32                   # number of dialogue instances in each batch 
+batch_size=64                   # number of dialogue instances in each batch 
 max_length=256                  # batch size is reduced if len(input_feature) >= max_length
 include_caption=caption,summary # concatenate caption and summary together 
 sep_caption=1                   # separate caption from history 
@@ -65,7 +65,7 @@ if [ $decode_data = 'off' ]; then
   labeled_test=$data_root/lbl_test_set4DSTC7-AVSD.json
   eval_set=${labeled_test}
   if [ $undisclosed_only -eq 1 ]; then
-    eval_set=$data_root/lbl_undisclosedonly_test_set4DSTC7-AVSD.json 
+    eval_set=$data_root/lbl_undiscloseonly_test_set4DSTC7-AVSD.json 
   fi
 fi
 echo Exp Directory $expdir 
@@ -106,6 +106,38 @@ if [ $stage -le 2 ]; then
     echo -------------------------
     echo stage 2: model training
     echo -------------------------
+    echo train.py \
+      --gpu $gpu_id \
+      --fea-type $fea_type \
+      --train-path "$fea_dir/$fea_file" \
+      --train-set $train_set \
+      --valid-path "$fea_dir/$fea_file" \
+      --valid-set $valid_set \
+      --num-epochs $num_epochs \
+      --batch-size $batch_size \
+      --max-length $max_length \
+      --model $expdir/$model_prefix \
+      --rand-seed $seed \
+      --report-interval $report_interval \
+      --nb-blocks $nb_blocks \
+      --include-caption $include_caption \
+      --max-history-length $max_his_len \
+      --separate-his-embed $sep_his_embed \
+      --separate-caption $sep_caption \
+      --merge-source $merge_source \
+      --separate-cap-embed $sep_cap_embed \
+      --warmup-steps $warmup_steps \
+      --nb-blocks $nb_blocks \
+      --d-model $d_model \
+      --d-ff $d_ff \
+      --att-h $att_h \
+      --dropout $dropout \
+      --cut-a $cut_a \
+      --loss-l ${loss_l} \
+      --diff-encoder ${diff_encoder} \
+      --diff-embed ${diff_embed} \
+      --auto-encoder-ft ${auto_encoder_ft} \
+      --diff-gen ${diff_gen}
     python train.py \
       --gpu $gpu_id \
       --fea-type $fea_type \
@@ -186,7 +218,7 @@ if [ $stage -le 4 ]; then
         echo Evaluating: $result
         utils/get_annotation.py -s data/stopwords.txt $data_set $reference
         utils/get_hypotheses.py -s data/stopwords.txt $result $hypothesis
-        python2 utils/evaluate.py $reference $hypothesis >& $result_eval
+        python utils/evaluate.py $reference $hypothesis >& $result_eval
         echo Wrote details in $result_eval
         echo "--- summary ---"
         awk '/^(Bleu_[1-4]|METEOR|ROUGE_L|CIDEr):/{print $0; if($1=="CIDEr:"){exit}}'\

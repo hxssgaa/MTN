@@ -16,5 +16,5 @@ cocoEval.evaluate()
 # print output evaluation scores
 for metric, score in cocoEval.eval.items():
     print('%s: %.3f'%(metric, score))
-for key,value in cocoEval.imgToEval.iteritems():
+for key,value in cocoEval.imgToEval.items():
     print(key,value)

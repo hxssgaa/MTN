@@ -11,7 +11,9 @@ import json
 import numpy as np
 import pdb 
 import torch 
-from data_utils import * 
+from data_utils import *
+from transformers import AutoTokenizer
+from tqdm import tqdm
 
 def get_npy_shape(filename):
     # read npy file header and return its shape
@@ -41,6 +43,9 @@ def align_vocab(pretrained_vocab, vocab, pretrained_weights):
                 print("Aligned emb of shape {}".format(embs.shape))
                 print("Number of unmatched words {}".format(count))
     return pretrained_weights
+
+def get_tokenizer(model_name):
+    return AutoTokenizer.from_pretrained(model_name, verbose=False)
 
 def get_vocabulary(dataset_file, cutoff=1, include_caption='none'):
     vocab = {'<unk>':0, '<blank>':1, '<sos>':2, '<eos>':3}
@@ -86,20 +91,30 @@ def words2ids(str_in, vocab):
     return sentence
 
 # Load text data
-def load(fea_types, fea_path, dataset_file, vocab, include_caption='none', separate_caption=False, max_history_length=-1, merge_source=False, undisclosed_only=False):
+def load(fea_types, fea_path, dataset_file, vocab, tokenizer=None, include_caption='none', separate_caption=False, max_history_length=-1, merge_source=False, undisclosed_only=False):
     dialog_data = json.load(open(dataset_file, 'r'))
     dialog_list = []
     vid_set = set()
     qa_id = 0
-    for dialog in dialog_data['dialogs']:
-        if include_caption == 'caption' or include_caption == 'summary':
-            caption = words2ids(dialog[include_caption], vocab)
-        elif include_caption == 'caption,summary':
-            caption = words2ids(dialog['caption'] + dialog['summary'], vocab)
+    for dialog in tqdm(dialog_data['dialogs'][:100]):
+        if not tokenizer:
+            if include_caption == 'caption' or include_caption == 'summary':
+                caption = words2ids(dialog[include_caption], vocab)
+            elif include_caption == 'caption,summary':
+                caption = words2ids(dialog['caption'] + dialog['summary'], vocab)
+            else:
+                caption = np.array([vocab['<blank>']], dtype=np.int32)
+            questions = [words2ids(d['question'], vocab) for d in dialog['dialog']]
+            answers = [words2ids(d['answer'], vocab) for d in dialog['dialog']]
         else:
-            caption = np.array([vocab['<blank>']], dtype=np.int32)
-        questions = [words2ids(d['question'], vocab) for d in dialog['dialog']]
-        answers = [words2ids(d['answer'], vocab) for d in dialog['dialog']]
+            if include_caption == 'caption' or include_caption == 'summary':
+                caption = np.array(tokenizer(dialog[include_caption]).data['input_ids'], dtype=np.int32)
+            elif include_caption == 'caption,summary':
+                caption = np.array(tokenizer(dialog['caption'] + dialog['summary']).data['input_ids'], dtype=np.int32)
+            else:
+                caption = np.array([tokenizer.pad_token_id], dtype=np.int32)
+            questions = [np.array(tokenizer(d['question']).data['input_ids'], dtype=np.int32) for d in dialog['dialog']]
+            answers = [np.array(tokenizer(d['answer']).data['input_ids'], dtype=np.int32) for d in dialog['dialog']]
         qa_pair = [np.concatenate((q,a)).astype(np.int32) for q,a in zip(questions, answers)]
         vid = dialog['image_id']
         vid_set.add(vid)
@@ -125,15 +140,22 @@ def load(fea_types, fea_path, dataset_file, vocab, include_caption='none', separ
             question = questions[n]
             if merge_source:
                 question = np.concatenate((caption, history, question))
-            answer_in = answers[n][:-1]
-            answer_out = answers[n][1:]
-            item = [vid, qa_id, history, question, answer_in, answer_out]
+            if not tokenizer:
+                answer_in = answers[n][:-1]
+                answer_out = answers[n][1:]
+                item = [vid, qa_id, history, question, answer_in, answer_out]
+            else:
+                item = [vid, qa_id, history, question, answers[n], None]
             if (include_caption == 'caption' or include_caption == 'summary' or include_caption == 'caption,summary') and separate_caption:
                 item.append(caption)
             dialog_list.append(item)
             qa_id += 1
-    data = {'dialogs': dialog_list, 'vocab': vocab, 'features': [], 
-            'original': dialog_data}
+    if not tokenizer:
+        data = {'dialogs': dialog_list, 'vocab': vocab, 'features': [],
+                'original': dialog_data}
+    else:
+        data = {'dialogs': dialog_list, 'vocab': tokenizer.get_vocab(), 'features': [],
+                'original': dialog_data}
     if fea_types is not None and fea_types[0] != 'none':
         for ftype in fea_types:
             basepath = fea_path.replace('<FeaType>', ftype)
@@ -239,7 +261,7 @@ def make_batch(data, index, vocab, separate_caption=False, skip=[1,1,1], cut_a=F
 
         for i in six.moves.range(len(feature_info)):
             x_batch[i][:len(fea[i]), j] = fea[i]
-    pad = vocab['<blank>']
+    pad = vocab['<pad>']
     h_batch = []
     q_batch = []
     a_batch_in = []
@@ -256,7 +278,8 @@ def make_batch(data, index, vocab, separate_caption=False, skip=[1,1,1], cut_a=F
             pr = np.random.uniform()
             if pr >= (1-cut_a_p):
                 end_idx = np.random.choice(range(1, len(answer_in)), 1)[0]
-                answer_out = np.concatenate((answer_in[1:end_idx],[answer_in[end_idx]]))
+                if answer_out:
+                    answer_out = np.concatenate((answer_in[1:end_idx],[answer_in[end_idx]]))
                 answer_in = answer_in[:end_idx]
         if separate_caption:
             c_batch.append(dialogs[qa_id][6])
@@ -267,7 +290,8 @@ def make_batch(data, index, vocab, separate_caption=False, skip=[1,1,1], cut_a=F
     h_batch = prepare_data(pad_seq(h_batch, h_len, pad))
     q_batch = prepare_data(pad_seq(q_batch, q_len, pad))
     a_batch_in = prepare_data(pad_seq(a_batch_in, a_len, pad))
-    a_batch_out = prepare_data(pad_seq(a_batch_out, a_len, pad))
+    if a_batch_out and a_batch_out[0]:
+        a_batch_out = prepare_data(pad_seq(a_batch_out, a_len, pad))
     if separate_caption:
       c_batch = prepare_data(pad_seq(c_batch, c_len, pad))
     batch = Batch(q_batch, h_batch, h_st_batch, x_batch, c_batch, a_batch_in, a_batch_out, pad)
