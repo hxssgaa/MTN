@@ -238,7 +238,23 @@ class EncoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = LayerNorm(self.embed_dim)
 
-    def forward(self, x, encoder_padding_mask, output_attentions=False):
+        self.encoder_attn = Attention(
+            self.embed_dim,
+            config.decoder_attention_heads,
+            dropout=config.attention_dropout,
+            encoder_decoder_attention=True,
+        )
+        self.encoder_attn_layer_norm = LayerNorm(self.embed_dim)
+
+    def forward(
+        self,
+        x,
+        encoder_padding_mask,
+        encoder_hidden_states = None,
+        encoder_attn_mask = None,
+        layer_state=None,
+        output_attentions=False,
+    ):
         """
         Args:
             x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
@@ -260,6 +276,24 @@ class EncoderLayer(nn.Module):
         x = residual + x
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
+
+        # Cross-Attention Block
+        if encoder_hidden_states is not None:
+            residual = x
+            assert self.encoder_attn.cache_key != self.self_attn.cache_key
+            if self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
+            x, cross_attn_weights = self.encoder_attn(
+                query=x,
+                key=encoder_hidden_states,
+                key_padding_mask=encoder_attn_mask,
+                layer_state=layer_state,  # mutates layer state
+                output_attentions=output_attentions,
+            )
+            x = F.dropout(x, p=self.dropout, training=self.training)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
 
         residual = x
         if self.normalize_before:
@@ -312,7 +346,15 @@ class BartEncoder(nn.Module):
         self.layer_norm = LayerNorm(config.d_model) if config.add_final_layer_norm else None
 
     def forward(
-        self, input_ids, attention_mask=None, output_attentions=False, output_hidden_states=False, return_dict=False
+        self,
+        input_ids,
+        attention_mask=None,
+        encoder_hidden_states=None,
+        encoder_padding_mask=None,
+        output_attentions=False,
+        output_hidden_states=False,
+        past_key_values=None,
+        return_dict=False
     ):
         """
         Args:
@@ -341,18 +383,27 @@ class BartEncoder(nn.Module):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
+        if encoder_hidden_states is not None:
+            encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
 
         encoder_states = [] if output_hidden_states else None
         all_attentions = () if output_attentions else None
-        for encoder_layer in self.layers:
+        for idx, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states.append(x)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = random.uniform(0, 1)
+            layer_state = past_key_values[idx] if past_key_values is not None else None
             if self.training and (dropout_probability < self.layerdrop):  # skip the layer
                 attn = None
             else:
-                x, attn = encoder_layer(x, attention_mask, output_attentions=output_attentions)
+                x, attn = encoder_layer(
+                    x,
+                    attention_mask,
+                    encoder_attn_mask=encoder_padding_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    output_attentions=output_attentions
+                )
 
             if output_attentions:
                 all_attentions = all_attentions + (attn,)
@@ -378,6 +429,11 @@ class DecoderLayer(nn.Module):
         self.embed_dim = config.d_model
 
         self.self_attn = Attention(
+            embed_dim=self.embed_dim,
+            num_heads=config.decoder_attention_heads,
+            dropout=config.attention_dropout,
+        )
+        self.self_attn2 = Attention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             dropout=config.attention_dropout,
@@ -408,6 +464,7 @@ class DecoderLayer(nn.Module):
         causal_mask=None,
         decoder_padding_mask=None,
         output_attentions=False,
+        encoder_hidden_states2=None,
     ):
         residual = x
 
@@ -498,6 +555,14 @@ class BartDecoder(nn.Module):
         self.layernorm_embedding = LayerNorm(config.d_model) if config.normalize_embedding else nn.Identity()
         self.layer_norm = LayerNorm(config.d_model) if config.add_final_layer_norm else None
 
+        vid_attn = nn.ModuleList()
+        c = copy.deepcopy
+        attn = MultiHeadedAttention(8, config.d_model)
+        for _ in config.ft_sizes:
+            vid_attn.append(c(attn))
+        self.vid_attn = vid_attn
+
+
     def forward(
         self,
         input_ids,
@@ -510,6 +575,7 @@ class BartDecoder(nn.Module):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=False,
+        encoder_hidden_states2=None,
         **unused,
     ):
         """
@@ -563,6 +629,7 @@ class BartDecoder(nn.Module):
         # Convert to Bart output format: (seq_len, BS, model_dim) -> (BS, seq_len, model_dim)
         x = x.transpose(0, 1)
         encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
+        encoder_hidden_states2 = encoder_hidden_states2[0].transpose(0, 1)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -586,6 +653,7 @@ class BartDecoder(nn.Module):
                 layer_state=layer_state,
                 causal_mask=decoder_causal_mask,
                 output_attentions=output_attentions,
+                encoder_hidden_states2=encoder_hidden_states2,
             )
 
             if use_cache:
@@ -863,12 +931,10 @@ class BartModel(PretrainedBartModel):
         dropout = 0.1
         position = PositionalEncoding(config.d_model, dropout)
         vid_encoder = nn.ModuleList()
-        vid_attn = nn.ModuleList()
-        attn = MultiHeadedAttention(8, config.d_model)
         for ft_size in config.ft_sizes:
             ff_layers = [nn.Linear(ft_size, config.d_model), nn.ReLU(), c(position)]
             vid_encoder.append(nn.Sequential(*ff_layers))
-            vid_attn.append(c(attn))
+        self.vid_encoder = vid_encoder
 
         self.init_weights()
 
@@ -893,6 +959,7 @@ class BartModel(PretrainedBartModel):
         attention2_mask=None,
         decoder_input_ids=None,
         encoder_outputs: Optional[Tuple] = None,
+        encoder_outputs2 = None,
         decoder_attention_mask=None,
         past_key_values=None,
         use_cache=None,
@@ -933,13 +1000,21 @@ class BartModel(PretrainedBartModel):
         assert decoder_input_ids is not None
 
         if encoder_outputs is None:
+            encoder_outputs2 = self.vid_encode(input2_ids, attention2_mask)
+
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                encoder_hidden_states=encoder_outputs2[0],
+                encoder_padding_mask=attention2_mask[0],
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
+
+            print()
+
         # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOuput when return_dict=False
         elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
             encoder_outputs = BaseModelOutput(
@@ -960,6 +1035,7 @@ class BartModel(PretrainedBartModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            encoder_hidden_states2=encoder_outputs2
         )
 
         if not return_dict:
