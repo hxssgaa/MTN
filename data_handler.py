@@ -96,7 +96,7 @@ def load(fea_types, fea_path, dataset_file, vocab, tokenizer=None, include_capti
     dialog_list = []
     vid_set = set()
     qa_id = 0
-    for dialog in tqdm(dialog_data['dialogs'][:100]):
+    for dialog in tqdm(dialog_data['dialogs']):
         if not tokenizer:
             if include_caption == 'caption' or include_caption == 'summary':
                 caption = words2ids(dialog[include_caption], vocab)

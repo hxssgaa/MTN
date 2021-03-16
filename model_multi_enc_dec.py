@@ -374,6 +374,8 @@ class BartEncoder(nn.Module):
         # check attention mask and invert
         if attention_mask is not None:
             attention_mask = invert_mask(attention_mask)
+        if encoder_padding_mask is not None:
+            encoder_padding_mask = invert_mask(encoder_padding_mask)
 
         inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
         embed_pos = self.embed_positions(input_ids)
@@ -402,7 +404,8 @@ class BartEncoder(nn.Module):
                     attention_mask,
                     encoder_attn_mask=encoder_padding_mask,
                     encoder_hidden_states=encoder_hidden_states,
-                    output_attentions=output_attentions
+                    output_attentions=output_attentions,
+                    layer_state=layer_state
                 )
 
             if output_attentions:
@@ -464,7 +467,6 @@ class DecoderLayer(nn.Module):
         causal_mask=None,
         decoder_padding_mask=None,
         output_attentions=False,
-        encoder_hidden_states2=None,
     ):
         residual = x
 
@@ -575,7 +577,6 @@ class BartDecoder(nn.Module):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=False,
-        encoder_hidden_states2=None,
         **unused,
     ):
         """
@@ -629,7 +630,6 @@ class BartDecoder(nn.Module):
         # Convert to Bart output format: (seq_len, BS, model_dim) -> (BS, seq_len, model_dim)
         x = x.transpose(0, 1)
         encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
-        encoder_hidden_states2 = encoder_hidden_states2[0].transpose(0, 1)
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -653,7 +653,6 @@ class BartDecoder(nn.Module):
                 layer_state=layer_state,
                 causal_mask=decoder_causal_mask,
                 output_attentions=output_attentions,
-                encoder_hidden_states2=encoder_hidden_states2,
             )
 
             if use_cache:
@@ -1002,6 +1001,8 @@ class BartModel(PretrainedBartModel):
         if encoder_outputs is None:
             encoder_outputs2 = self.vid_encode(input2_ids, attention2_mask)
 
+            attention2_mask[0] = attention2_mask[0].squeeze(1)
+
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -1012,8 +1013,6 @@ class BartModel(PretrainedBartModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-
-            print()
 
         # If the user passed a tuple for encoder_outputs, we wrap it in a BaseModelOuput when return_dict=False
         elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
@@ -1035,7 +1034,6 @@ class BartModel(PretrainedBartModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            encoder_hidden_states2=encoder_outputs2
         )
 
         if not return_dict:

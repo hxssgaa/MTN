@@ -14,6 +14,8 @@ import pdb
 from tqdm import tqdm
 import torch
 import torch.nn as nn
+from transformers import AdamW
+
 import data_handler as dh
 from mtn import *
 from model_multi_enc_dec import BartForConditionalGeneration
@@ -27,32 +29,34 @@ def _reset_bart_config(bart_cfg):
     bart_cfg.no_repeat_ngram_size = 0
 
 
-def run_epoch(data, indices, vocab, epoch, model, eval=False):
+def run_epoch(data, indices, vocab, epoch, model, optimizer, eval=False):
     "Standard Training and Logging Function"
-    start = time.time()
     total_tokens = 0
-    total_loss = 0
-    tokens = 0
+    train_loss = []
     it = tqdm(range(len(indices)), desc="epoch {}/{}".format(epoch + 1, args.num_epochs), ncols=0)
     for j in it:
         batch = dh.make_batch(data, indices[j], vocab, separate_caption=args.separate_caption, cut_a=args.cut_a)
         b = batch
-        if True:
-            loss = model.forward(b.query, b.fts, b.query_mask, b.fts_mask,
-                                 labels=b.trg)[0]
-        total_loss += loss
-        total_tokens += b.ntokens
-        tokens += b.ntokens
-        if (j + 1) % args.report_interval == 0 and not eval:
-            elapsed = time.time() - start
-            print("Epoch: %d Step: %d Loss: %f Tokens per Sec: %f" %
-                  (epoch + 1, j + 1, loss / b.ntokens.float(), float(tokens) / elapsed))
-            with open(train_log_path, "a") as f:
-                f.write("{},{},{:e},{}\n".format(epoch + 1, j + 1, loss / b.ntokens.float(), float(tokens) / elapsed))
-            start = time.time()
-            tokens = 0
+        loss = model.forward(b.query, b.fts, b.query_mask, b.fts_mask,
+                             labels=b.trg)[0]
+
+        model.zero_grad()
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+        optimizer.step()
+        train_loss.append(loss.item())
+
+        # total_tokens += b.ntokens
+        # tokens += b.ntokens
+        # if (j + 1) % args.report_interval == 0 and not eval:
+        #     elapsed = time.time() - start
+        #     print("Epoch: %d Step: %d Loss: %f Tokens per Sec: %f" %
+        #           (epoch + 1, j + 1, loss / b.ntokens.float(), float(tokens) / elapsed))
+        #     start = time.time()
+        #     tokens = 0
         # prefetch.join()
-    return total_loss / total_tokens.float()
+    return np.mean(train_loss)
 
 
 ##################################
@@ -81,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument('--d-ff', default=2048, type=int, help='dimension of feed forward')
     parser.add_argument('--att-h', default=8, type=int, help='number of attention heads')
     parser.add_argument('--dropout', default=0.1, type=float, help='dropout rate')
+    parser.add_argument('--learning_rate', default=5e-5, type=float, help='dropout rate')
     parser.add_argument('--separate-his-embed', default=0, type=int, help='Separate the dialog history embedding?')
     parser.add_argument('--separate-cap-embed', default=0, type=int, help='Separate the video caption embedding')
     parser.add_argument('--diff-encoder', default=0, type=int, help='use different encoder for the autoencoder?')
@@ -192,30 +197,27 @@ if __name__ == "__main__":
     bestmodel_num = 0
     # save results 
     trace_log_path = args.model + '_trace.csv'
-    # with open(trace_log_path, "w") as f:
-    #     f.write('epoch,split,avg_loss\n')
-    # train_log_path = args.model + '_train.csv'
-    # with open(train_log_path, "w") as f:
-    #     f.write('epoch,step,loss,tokens_per_sec\n')
-    # print("Saving training results to {}".format(train_log_path))
-    # print("Saving val results to {}".format(trace_log_path))
-    model_opt = NoamOpt(args.d_model, 1, args.warmup_steps,
-                        torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+    with open(trace_log_path, "w") as f:
+        f.write('epoch,split,avg_loss\n')
+    train_log_path = args.model + '_train.csv'
+    with open(train_log_path, "w") as f:
+        f.write('epoch,step,loss,tokens_per_sec\n')
+    print("Saving training results to {}".format(train_log_path))
+    print("Saving val results to {}".format(trace_log_path))
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = AdamW(parameters, lr=float(args.learning_rate), eps=1e-8)
     for epoch in range(args.num_epochs):
         # start training 
         random.shuffle(train_indices)
         model.train()
         train_loss = run_epoch(train_data, train_indices, vocab, epoch,
-                               model)
+                               model, optimizer)
         logging.info("epoch: %d  train loss: %f" % (epoch + 1, train_loss))
         # test on validation data 
         logging.info('-------validation--------')
         model.eval()
         valid_loss = run_epoch(valid_data, valid_indices, vocab, epoch,
-                               model,
-                               SimpleLossCompute(model.generator, model.auto_encoder_generator,
-                                                 criterion, opt=None, l=args.loss_l),
-                               eval=True)
+                               model, optimizer)
         logging.info('epoch: %d validation loss: %f' % (epoch + 1, valid_loss))
         with open(trace_log_path, "a") as f:
             f.write("{},train,{:e}\n".format(epoch + 1, train_loss))
